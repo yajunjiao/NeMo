@@ -38,6 +38,7 @@ def eval_iter_callback(tensors, global_vars):
 
     subtokens_mask = output['subtokens_mask'] > 0.5
     punct_preds = torch.argmax(output['punct_logits'], axis=-1)
+    global_vars['punct_preds'].extend(tensor2list(punct_preds[subtokens_mask]))
     global_vars['capit_preds'].extend(tensor2list(torch.argmax(output['capit_logits'], axis=-1)[subtokens_mask]))
     global_vars['punct_labels'].extend(tensor2list(output['punct_labels'][subtokens_mask]))
     global_vars['capit_labels'].extend(tensor2list(output['capit_labels'][subtokens_mask]))
@@ -46,6 +47,8 @@ def eval_iter_callback(tensors, global_vars):
         if 'part_sent_preds' not in global_vars:
             global_vars['part_sent_preds'] = []
             global_vars['part_sent_labels'] = []
+            global_vars['punct_corr_preds'] = []
+            global_vars['punct_corr_labels'] = []
 
         num_examples = output['punct_logits'].shape[0]
         part_sent_preds = tensor2list(torch.argmax(output['part_sent_logits'], -1))
@@ -57,11 +60,10 @@ def eval_iter_callback(tensors, global_vars):
                 punct_pred[-1] = 0
                 print('corrected')
 
-            global_vars['punct_preds'].extend(punct_pred)
+            global_vars['punct_corr_preds'].extend(punct_pred)
+        global_vars['punct_corr_labels'].extend(tensor2list(output['punct_labels'][subtokens_mask]))
         global_vars['part_sent_labels'].extend(tensor2list(output['part_sent_labels']))
         global_vars['part_sent_preds'].extend(part_sent_preds)
-    else:
-        global_vars['punct_preds'].extend(tensor2list(punct_preds[subtokens_mask]))
 
 
 def _get_result_dict(tag, class_report):
@@ -90,6 +92,10 @@ def eval_epochs_done_callback(
     punct_class_report = _eval_epochs_done_callback('punct', global_vars, punct_label_ids, work_dir, graph_fold, normalize_cm)
     results.update(_get_result_dict('p', punct_class_report))
 
+    if 'punct_corr_preds' in global_vars:
+        punct_class_report = _eval_epochs_done_callback('punct_corr', global_vars, punct_label_ids, work_dir, graph_fold, normalize_cm)
+        results.update(_get_result_dict('p', punct_class_report))
+
     capit_class_report = _eval_epochs_done_callback('capit', global_vars, capit_label_ids, work_dir, graph_fold, normalize_cm)
     results.update(_get_result_dict('c', capit_class_report))
    
@@ -113,8 +119,10 @@ def _eval_epochs_done_callback(task_name, global_vars, label_ids, work_dir=None,
   
     if work_dir is not None:
         with open(os.path.join(work_dir, task_name + '_labels_preds.txt'), 'w') as f:
-            f.write(str(labels))
-            f.write(str(preds))
+            f.write(' '.join(list(map(str, labels))))
+            f.write('\n')
+            f.write(' '.join(list(map(str, preds))))
+            
         logging.info(f'labels and preds are saved at {work_dir}')
 
     # calculate and plot confusion_matrix

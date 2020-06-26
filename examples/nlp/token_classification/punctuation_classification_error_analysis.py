@@ -22,15 +22,8 @@ from nemo.utils import logging
 parser = argparse.ArgumentParser(description='Punctuation and capitalization detection error analysis')
 parser.add_argument("--input_file", default='text_dev.txt', type=str,
     help='Path to file formatted as text_train.txt, see documentation')
-parser.add_argument("--labels_preds_dir", default='error_analysis/', type=str, 
+parser.add_argument("--labels_preds_dir", default='output', type=str, 
     help='Path to dir that contains task_name_labels_preds.txt files')
-parser.add_argument(
-    "--labels_dict_dir",
-    default='data_dir',
-    type=str,
-    help='Path to directory with punct_label_ids.csv, capit_label_ids.csv and part_sent_label_ids.csv(optional) files. ' +
-    'These files are generated during training when the datalayer is created',
-)
 parser.add_argument(
     "--labels_dict_dir",
     default='data_dir',
@@ -56,7 +49,19 @@ labels_preds_dict = {}
 for task_name in task_names:
     labels_preds_dict[task_name] = {}
     with open(os.path.join(args.labels_preds_dir, task_name + '_labels_preds.txt'), 'r') as f:
-        labels_preds_dict[task_name]['labels'], labels_preds_dict[task_name]['preds'] = f.readlines()
+        lines = f.readlines()
+        # if len(lines) == 1:
+        #     half = len(lines[0]) // 2
+        #     labels = lines[0][:half]
+        #     preds = lines[0][half:]
+        #     assert len(labels) == len(preds)
+        #     labels_preds_dict[task_name]['labels'] = [int(x) for x in labels.strip().split()]
+        #     labels_preds_dict[task_name]['preds'] = [int(x) for x in preds.strip().split()]
+        if len(lines) == 2:
+            labels = lines[0].strip().split()
+            preds = lines[1].strip().split()
+            labels_preds_dict[task_name]['labels'] = [int(x) for x in labels]
+            labels_preds_dict[task_name]['preds'] = [int(x) for x in preds]
 
 def _get_combined_output(words, mode='preds'):
     output = ''
@@ -73,18 +78,19 @@ def _get_combined_output(words, mode='preds'):
 
 correct = 0
 wrong = 0
-with open(args.input_file, 'w') as text:
-    for i, line in enumerate(text):
-        words = line.stirp().split()
-
+with open(args.input_file, 'r') as text:
+    for line in text:
+        words = line.strip().split()
+        if 'personal affairs' in line:
+            import pdb; pdb.set_trace()
         prediction = _get_combined_output(words, mode='preds').strip()
         ground_truth = _get_combined_output(words, mode='labels').strip()
         if prediction == ground_truth:
             correct += 1
         else:
             wrong += 1
-            logging.info(f'Predictions: {prediction.strip()}\n')
-            logging.info(f'Ground Truth: {prediction.strip()}\n')
+            logging.info(f'Pred: {prediction}')
+            logging.info(f'True: {ground_truth}\n')
 
-logging.into(f'Number of correct predictions: {correct}')
-logging.into(f'Number of wrong predictions: {wrong}')
+logging.info(f'Number of correct predictions: {correct}')
+logging.info(f'Number of wrong predictions: {wrong}')

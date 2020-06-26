@@ -91,7 +91,6 @@ def get_features(
             pad_id = punct_label_ids[pad_label]
             punct_labels = [pad_id]
             punct_query_labels = [punct_label_ids[label] for label in punct_labels_lines[i]]
-
             capit_labels = [pad_id]
             capit_query_labels = [capit_label_ids[label] for label in capit_labels_lines[i]]
 

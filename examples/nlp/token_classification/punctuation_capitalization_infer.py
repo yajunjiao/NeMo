@@ -22,8 +22,9 @@ import numpy as np
 import nemo
 import nemo.collections.nlp as nemo_nlp
 from nemo import logging
-from nemo.collections.nlp.nm.data_layers import BertTokenClassificationInferDataLayer
+from nemo.collections.nlp.nm.data_layers import BertTokenClassificationInferDataLayer, PunctuationCapitalizationDataLayer
 from nemo.collections.nlp.utils.data_utils import get_vocab
+from nemo.collections.nlp.utils.callback_utils import get_classification_report
 
 # Parsing arguments
 parser = argparse.ArgumentParser(description='Punctuation and capitalization detection inference')
@@ -96,6 +97,10 @@ parser.add_argument(
     help='Path to directory with punct_label_ids.csv, capit_label_ids.csv and part_sent_label_ids.csv(optional) files. ' +
     'These files are generated during training when the datalayer is created',
 )
+parser.add_argument('--data_dir', default='data', type=str)
+parser.add_argument('--eval_file_prefix', default='dev', type=str)
+parser.add_argument('--mode', default='examples', choices=['examples', 'file'])
+parser.add_argument('--batch_size', default=8, type=int)
 
 args = parser.parse_args()
 
@@ -112,6 +117,9 @@ if not os.path.exists(punct_labels_dict_path) or not os.path.exists(capit_labels
 
 punct_labels_dict = get_vocab(punct_labels_dict_path)
 capit_labels_dict = get_vocab(capit_labels_dict_path)
+punct_label_ids = {v:k for k, v in punct_labels_dict.items()}
+capit_label_ids = {v:k for k, v in capit_labels_dict.items()}
+part_sent_labels_dict = None
 
 if args.add_part_sent_head:
     part_sent_labels_dict_path = os.path.join(args.labels_dict_dir, 'part_sent_label_ids.csv')
@@ -133,10 +141,6 @@ tokenizer = nemo_nlp.data.tokenizers.get_tokenizer(
 
 hidden_size = model.hidden_size
 
-data_layer = BertTokenClassificationInferDataLayer(
-    queries=args.queries, tokenizer=tokenizer, max_seq_length=args.max_seq_length, batch_size=1
-)
-
 classifier = nemo_nlp.nm.trainables.PunctCapitTokenClassifier(
     hidden_size=hidden_size,
     punct_num_classes=len(punct_labels_dict),
@@ -146,46 +150,137 @@ classifier = nemo_nlp.nm.trainables.PunctCapitTokenClassifier(
     capit_num_layers=args.capit_num_fc_layers,
 )
 
-input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask = data_layer()
-hidden_states = model(input_ids=input_ids, token_type_ids=input_type_ids, attention_mask=input_mask)
-punct_logits, capit_logits, part_sent_logits = classifier(hidden_states=hidden_states)
+if args.mode == 'examples':
+    data_layer = BertTokenClassificationInferDataLayer(
+    queries=args.queries, tokenizer=tokenizer, max_seq_length=args.max_seq_length, batch_size=1
+    )
+    input_ids, input_type_ids, input_mask, loss_mask, subtokens_mask = data_layer()
+    hidden_states = model(input_ids=input_ids, token_type_ids=input_type_ids, attention_mask=input_mask)
+    punct_logits, capit_logits, part_sent_logits = classifier(hidden_states=hidden_states)
 
-logits = [punct_logits, capit_logits]
-if args.add_part_sent_head:
-    logits.append(part_sent_logits)
+    logits = [punct_logits, capit_logits]
+    if args.add_part_sent_head:
+        logits.append(part_sent_logits)
 
-evaluated_tensors = nf.infer(tensors=logits + [subtokens_mask], checkpoint_dir=args.checkpoint_dir)
+    evaluated_tensors = nf.infer(tensors=logits + [subtokens_mask], checkpoint_dir=args.checkpoint_dir)
 
-def concatenate(lists):
-    return np.concatenate([t.cpu() for t in lists])
+    def concatenate(lists):
+        return np.concatenate([t.cpu() for t in lists])
 
-if args.add_part_sent_head:
-    punct_logits, capit_logits, part_sent_logits, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
-    part_sent_preds = 0
-    import pdb; pdb.set_trace()
+    if args.add_part_sent_head:
+        punct_logits, capit_logits, part_sent_logits, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
+        part_sent_preds = 0
+    else:
+        punct_logits, capit_logits, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
+
+    punct_preds = np.argmax(punct_logits, axis=2)
+    capit_preds = np.argmax(capit_logits, axis=2)
+
+    for i, query in enumerate(args.queries):
+        logging.info(f'Query: {query}')
+
+        punct_pred = punct_preds[i][subtokens_mask[i] > 0.5]
+        capit_pred = capit_preds[i][subtokens_mask[i] > 0.5]
+        words = query.strip().split()
+        if len(punct_pred) != len(words) or len(capit_pred) != len(words):
+            raise ValueError('Pred and words must be of the same length')
+
+        output = ''
+        for j, w in enumerate(words):
+            punct_label = punct_labels_dict[punct_pred[j]]
+            capit_label = capit_labels_dict[capit_pred[j]]
+            if capit_label != args.none_label:
+                w = w.capitalize()
+            output += w
+            if punct_label != args.none_label:
+                output += punct_label
+            output += ' '
+        logging.info(f'Combined: {output.strip()}\n')
+
 else:
-    punct_logits, capit_logits, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
+    text_file = f'{args.data_dir}/text_{args.eval_file_prefix}.txt'
+    label_file = f'{args.data_dir}/labels_{args.eval_file_prefix}.txt'
 
-punct_preds = np.argmax(punct_logits, axis=2)
-capit_preds = np.argmax(capit_logits, axis=2)
+    data_layer = PunctuationCapitalizationDataLayer(
+            tokenizer=tokenizer,
+            text_file=text_file,
+            label_file=label_file,
+            pad_label=args.none_label,
+            punct_label_ids=punct_label_ids,
+            capit_label_ids=capit_label_ids,
+            max_seq_length=args.max_seq_length,
+            batch_size=args.batch_size,
+            part_sent_label_ids={v:k for k, v in part_sent_labels_dict.items()} if part_sent_labels_dict is not None else None,
+            add_part_sent_head=args.add_part_sent_head,
+        )
 
-for i, query in enumerate(args.queries):
-    logging.info(f'Query: {query}')
+    data = data_layer()
+    hidden_states = model(input_ids=data.input_ids, token_type_ids=data.input_type_ids, attention_mask=data.input_mask)
+    punct_logits, capit_logits, part_sent_logits = classifier(hidden_states=hidden_states)
 
-    punct_pred = punct_preds[i][subtokens_mask[i] > 0.5]
-    capit_pred = capit_preds[i][subtokens_mask[i] > 0.5]
-    words = query.strip().split()
-    if len(punct_pred) != len(words) or len(capit_pred) != len(words):
-        raise ValueError('Pred and words must be of the same length')
+    logits = [punct_logits, capit_logits]
+    if args.add_part_sent_head:
+        logits.append(part_sent_logits)
 
-    output = ''
-    for j, w in enumerate(words):
-        punct_label = punct_labels_dict[punct_pred[j]]
-        capit_label = capit_labels_dict[capit_pred[j]]
-        if capit_label != args.none_label:
-            w = w.capitalize()
-        output += w
-        if punct_label != args.none_label:
-            output += punct_label
-        output += ' '
-    logging.info(f'Combined: {output.strip()}\n')
+    evaluated_tensors = nf.infer(tensors=logits + [data.punct_labels, data.capit_labels, data.subtokens_mask], checkpoint_dir=args.checkpoint_dir)
+
+    def concatenate(lists):
+        return np.concatenate([t.cpu() for t in lists])
+
+    def _combine(words, punct_pred_or_label, capit_pred_or_label, add_punct=True, add_capit=True):
+            output = ''
+            for j, w in enumerate(words):
+                punct_label = punct_labels_dict[punct_pred_or_label[j]]
+                capit_label = capit_labels_dict[capit_pred_or_label[j]]
+
+                if add_capit:
+                    if capit_label != args.none_label:
+                        w = w.capitalize()
+                output += w
+                if add_punct:
+                    if punct_label != args.none_label:
+                        output += punct_label
+                output += ' '
+            return output
+
+    if args.add_part_sent_head:
+        punct_logits, capit_logits, part_sent_logits, punct_labels, capit_labels, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
+        part_sent_preds = 0
+    else:
+        punct_logits, capit_logits, punct_labels, capit_labels, subtokens_mask = [concatenate(tensors) for tensors in evaluated_tensors]
+
+    punct_preds = np.argmax(punct_logits, axis=2)
+    capit_preds = np.argmax(capit_logits, axis=2)
+  
+    logging.info(f'\n {get_classification_report(punct_labels[subtokens_mask>0.5], punct_preds[subtokens_mask>0.5], label_ids=punct_label_ids)}')
+    logging.info(f'\n {get_classification_report(capit_labels[subtokens_mask>0.5], capit_preds[subtokens_mask>0.5], label_ids=capit_label_ids)}')
+    correct = 0
+    wrong = 0
+    
+    file_for_errors_path = os.path.join(args.data_dir, args.checkpoint_dir.replace('/', '-') + '.txt')
+    file_for_errors = open(file_for_errors_path, 'w')
+    with open(text_file, 'r') as f:
+        for i, line in enumerate(f):
+            punct_pred = punct_preds[i][subtokens_mask[i] > 0.5]
+            punct_label = punct_labels[i][subtokens_mask[i] > 0.5]
+            capit_pred = capit_preds[i][subtokens_mask[i] > 0.5]
+            capit_label = capit_labels[i][subtokens_mask[i] > 0.5]
+            words = line.strip().split()
+            if len(punct_pred) != len(words) or len(capit_pred) != len(words):
+                print(f'{i} skipped')
+                continue
+                # raise ValueError('Pred and words must be of the same length')
+            
+            prediction = _combine(words, punct_pred, capit_pred, add_capit=False).strip()
+            ground_truth = _combine(words, punct_label, capit_label, add_capit=False).strip()
+
+            if prediction == ground_truth:
+                correct += 1
+            else:
+                wrong += 1
+                file_for_errors.write('Pred: ' + prediction + '\n')
+                file_for_errors.write('True: ' + ground_truth + '\n\n')
+
+logging.info(f'Number of correct predictions: {correct}')
+logging.info(f'Number of wrong predictions: {wrong}')
+logging.info(f'Incorrect examples saved to : {file_for_errors_path}')
